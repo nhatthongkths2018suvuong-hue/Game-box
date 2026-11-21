@@ -4,9 +4,13 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.DialogInterface;
+import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbInterface;
+import android.hardware.usb.UsbManager;
 import android.graphics.drawable.ColorDrawable;
 import android.os.Build;
 import android.os.Bundle;
@@ -40,6 +44,7 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
@@ -754,14 +759,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             "X", "Y", "Z", "RZ", "HAT_X", "HAT_Y", "L_TRIGGER", "R_TRIGGER"
     };
 
-    private void showPadTest() {
-        final TextView tv = new TextView(this);
-        tv.setTextColor(0xFFFFFFFF);
-        tv.setTextSize(14);
-        tv.setTypeface(Typeface.MONOSPACE);
-        tv.setPadding(dp(20), dp(10), dp(20), dp(10));
-
-        StringBuilder head = new StringBuilder("Android đang thấy các thiết bị nhập:\n");
+    /** Nội dung phần đầu hộp thoại: thiết bị nhập Android thấy + thiết bị USB box thấy. */
+    private String buildPadHead() {
+        StringBuilder head = new StringBuilder("Thiết bị nhập Android thấy:\n");
         for (int id : InputDevice.getDeviceIds()) {
             InputDevice d = InputDevice.getDevice(id);
             if (d == null || d.isVirtual()) continue;
@@ -773,22 +773,69 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             if ((src & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD) head.append("phím ");
             head.append("]\n");
         }
-        head.append("\nBấm nút hoặc gạt cần trên tay cầm, sự kiện hiện bên dưới.\n"
-                + "Nếu không hiện gì: Android không nhận tay cầm.\n\n");
-        final String headStr = head.toString();
+
+        head.append("\nThiết bị USB box thấy:\n");
+        try {
+            UsbManager um = (UsbManager) getSystemService(Context.USB_SERVICE);
+            HashMap<String, UsbDevice> usb = um == null ? null : um.getDeviceList();
+            if (usb == null || usb.isEmpty()) {
+                head.append("- (không có)\n");
+            } else {
+                for (UsbDevice u : usb.values()) {
+                    head.append("- VID:PID ")
+                            .append(String.format(Locale.US, "%04x:%04x", u.getVendorId(), u.getProductId()))
+                            .append("  lớp ").append(u.getDeviceClass());
+                    String pn = u.getProductName();
+                    if (pn != null) head.append("  ").append(pn);
+                    head.append("\n    giao diện (lớp/lớp con/giao thức):");
+                    for (int i = 0; i < u.getInterfaceCount(); i++) {
+                        UsbInterface it = u.getInterface(i);
+                        head.append(' ').append(it.getInterfaceClass()).append('/')
+                                .append(it.getInterfaceSubclass()).append('/')
+                                .append(it.getInterfaceProtocol());
+                    }
+                    head.append('\n');
+                }
+            }
+        } catch (Exception e) {
+            head.append("- (không đọc được: ").append(e.getClass().getSimpleName()).append(")\n");
+        }
+
+        head.append("\nCắm hoặc rút tay cầm, danh sách tự cập nhật sau vài giây.\n"
+                + "Bấm nút hoặc gạt cần, sự kiện hiện bên dưới.\n\n");
+        return head.toString();
+    }
+
+    private void showPadTest() {
+        final TextView tv = new TextView(this);
+        tv.setTextColor(0xFFFFFFFF);
+        tv.setTextSize(13);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setPadding(dp(20), dp(10), dp(20), dp(10));
+
         final ArrayList<String> log = new ArrayList<>();
         final String[] lastAxis = {""};
 
         final Runnable refresh = new Runnable() {
             @Override
             public void run() {
-                StringBuilder sb = new StringBuilder(headStr);
+                StringBuilder sb = new StringBuilder(buildPadHead());
                 if (log.isEmpty()) sb.append("(chưa có sự kiện nào)");
                 for (String l : log) sb.append(l).append('\n');
                 tv.setText(sb.toString());
             }
         };
         refresh.run();
+
+        // Tự làm mới danh sách thiết bị mỗi 1,5 giây khi hộp thoại còn mở
+        final Runnable ticker = new Runnable() {
+            @Override
+            public void run() {
+                refresh.run();
+                ui.postDelayed(this, 1500);
+            }
+        };
+        ui.postDelayed(ticker, 1500);
 
         final AlertDialog dlg = new AlertDialog.Builder(this)
                 .setTitle("Kiểm tra tay cầm")
@@ -800,6 +847,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     }
                 })
                 .create();
+        dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(DialogInterface d) {
+                ui.removeCallbacks(ticker);
+            }
+        });
 
         dlg.setOnKeyListener(new DialogInterface.OnKeyListener() {
             @Override
@@ -809,7 +862,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 String name = dv != null ? dv.getName() : "?";
                 log.add("PHÍM " + KeyEvent.keyCodeToString(keyCode).replace("KEYCODE_", "")
                         + " (" + keyCode + ")  <- " + name);
-                while (log.size() > 8) log.remove(0);
+                while (log.size() > 6) log.remove(0);
                 refresh.run();
                 // BACK từ tay cầm thì giữ lại để xem, BACK từ remote thì cho đóng hộp thoại
                 boolean fromPad = (ev.getSource() & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD;
@@ -836,7 +889,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     if (!str.isEmpty()) {
                         InputDevice dv = m.getDevice();
                         log.add("TRỤC " + str + " <- " + (dv != null ? dv.getName() : "?"));
-                        while (log.size() > 8) log.remove(0);
+                        while (log.size() > 6) log.remove(0);
                         refresh.run();
                     }
                 }
