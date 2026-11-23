@@ -447,6 +447,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final int depth;
         final boolean dir;
         boolean expanded = false;
+        boolean loading = false;
 
         Node(String label, File file, int depth, boolean dir) {
             this.label = label;
@@ -461,6 +462,38 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (s.equals("neogeo.zip")) return false;
         return s.endsWith(".nes") || s.endsWith(".fds") || s.endsWith(".unf")
                 || s.endsWith(".unif") || s.endsWith(".zip");
+    }
+
+    // Thư mục có game (ở chính nó hoặc trong thư mục con) thì mới hiện.
+    // Kết quả được nhớ suốt lần chạy app, khởi động lại app mới quét lại.
+    private final java.util.concurrent.ConcurrentHashMap<String, Boolean> gameCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private boolean hasGame(File d, int depth) {
+        String key = d.getPath();
+        Boolean c = gameCache.get(key);
+        if (c != null) return c;
+        File[] fs = d.listFiles();
+        boolean found = false;
+        if (fs != null) {
+            for (File x : fs) {
+                if (!x.getName().startsWith(".") && x.isFile() && isGameFile(x.getName())) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && depth < 12) {
+                for (File x : fs) {
+                    String nm = x.getName();
+                    if (x.isDirectory() && !nm.startsWith(".") && !nm.equals("Android") && hasGame(x, depth + 1)) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        gameCache.put(key, found);
+        return found;
     }
 
     private void buildRoots() {
@@ -492,30 +525,50 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void expand(int pos) {
-        Node n = nodes.get(pos);
-        File[] kids = n.file.listFiles();
-        ArrayList<Node> add = new ArrayList<>();
-        if (kids != null) {
-            Arrays.sort(kids, new Comparator<File>() {
-                @Override
-                public int compare(File a, File b) {
-                    if (a.isDirectory() != b.isDirectory()) return a.isDirectory() ? -1 : 1;
-                    return a.getName().compareToIgnoreCase(b.getName());
+        final Node n = nodes.get(pos);
+        if (n.loading) return;
+        n.loading = true;
+        // Đọc thư mục và lọc ở luồng nền để giao diện không bị khựng
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                File[] kids = n.file.listFiles();
+                final ArrayList<Node> add = new ArrayList<>();
+                if (kids != null) {
+                    Arrays.sort(kids, new Comparator<File>() {
+                        @Override
+                        public int compare(File a, File b) {
+                            if (a.isDirectory() != b.isDirectory()) return a.isDirectory() ? -1 : 1;
+                            return a.getName().compareToIgnoreCase(b.getName());
+                        }
+                    });
+                    for (File k : kids) {
+                        String name = k.getName();
+                        if (name.startsWith(".")) continue;
+                        if (k.isDirectory()) {
+                            if (name.equals("Android")) continue;
+                            if (hasGame(k, 1)) add.add(new Node(name, k, n.depth + 1, true));
+                        } else if (isGameFile(name)) {
+                            add.add(new Node(name, k, n.depth + 1, false));
+                        }
+                    }
                 }
-            });
-            for (File k : kids) {
-                String name = k.getName();
-                if (name.startsWith(".")) continue;
-                if (k.isDirectory()) add.add(new Node(name, k, n.depth + 1, true));
-                else if (isGameFile(name)) add.add(new Node(name, k, n.depth + 1, false));
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        n.loading = false;
+                        int idx = nodes.indexOf(n);
+                        if (idx < 0 || n.expanded) return;   // danh sách đã được dựng lại / đã mở rồi
+                        nodes.addAll(idx + 1, add);
+                        n.expanded = true;
+                        adapter.notifyDataSetChanged();
+                        if (add.isEmpty() && n.depth > 0) {
+                            Toast.makeText(MainActivity.this, "Thư mục không có game", Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                });
             }
-        }
-        nodes.addAll(pos + 1, add);
-        n.expanded = true;
-        adapter.notifyDataSetChanged();
-        if (add.isEmpty() && n.depth > 0) {
-            Toast.makeText(this, "Thư mục không có game", Toast.LENGTH_SHORT).show();
-        }
+        }).start();
     }
 
     private void collapse(int pos) {
